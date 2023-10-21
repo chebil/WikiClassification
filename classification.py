@@ -1,4 +1,3 @@
-import os
 import pandas as pd
 import torch
 import numpy as np
@@ -8,6 +7,7 @@ import torch.nn.functional as F
 import json
 from Bio import Entrez, Medline
 from joblib import Parallel, delayed
+
 
 
 device = torch.device('cuda' if True and torch.cuda.is_available() else 'cpu')
@@ -61,8 +61,10 @@ def compute_accuracy(pred, target):
 def get_matrix(subj,obj): 
   Entrez.email = 'noname@email.com'
   # Formulating the PubMed Query
-  query = '("' + subj + '"[Mesh]) AND "' + obj + '"[Mesh]'
+  query = '("' + subj + '/*"[Majr:NoExp]) AND "' + obj + '/*"[Majr:NoExp]'
+  # query = '("' + subj + '"[Mesh]) AND "' + obj + '"[Mesh]'
 #   print(query)
+  matrix = []
   # Searching for the PubMed records having the Subject and Object as MeSH Terms
   handle = Entrez.esearch(db="pubmed", retmax=20, term=query, sort="relevance")
   records1 = Entrez.read(handle)
@@ -70,6 +72,8 @@ def get_matrix(subj,obj):
   global PubIds
   PubIds= records1["IdList"]
   NPub = len(PubIds)
+  if(NPub==0):
+    return matrix
   Associations = []
   for publication in PubIds:
     handle = Entrez.efetch(db="pubmed", id=publication, rettype="medline", retmode="text")
@@ -103,7 +107,7 @@ def get_matrix(subj,obj):
         for o in object01:
           couples.append((s, o))
   # Creating the Matrix for the Associations
-  matrix = []
+  
   if couples != []:
     for q in qualifiers:
       row = []
@@ -112,36 +116,17 @@ def get_matrix(subj,obj):
         row.append(prop)
       matrix += row
     return matrix
-  
-#read excel in df
-df = pd.read_excel("missing_rels.xlsx")
-
-#split relations into 2 columns comma as delimiter and remove parenthesis
-df2 = df[['relations']].copy()
-df2[['subject','object']] = df['relations'].str.split(',',expand=True)
-df2['subject'] = df2['subject'].str.replace('(','')
-df2['object'] = df2['object'].str.replace(')','')
-df2['subject'] = df2['subject'].str.replace(' ','')
-df2['object'] = df2['object'].str.replace(' ','')
-df2['subject'] = df2['subject'].str.replace("'",'')
-df2['object'] = df2['object'].str.replace("'",'')
-#add  a new column to df2 with name property
-df2['property'] = ''
-#add  a new column to df2 with name references
-df2['references'] = ''
 
 #read df2 from pkl file
-# df2 = pd.read_pickle("from0.pkl")
+df2 = pd.read_pickle("results.pkl")
 
 #print the first subject and object
 with open('Id_Term.json', 'r') as fp:
     ID_T = json.load(fp)
-PATH=os.path.join('models/new_data_super_classes_best_model_1.zip')
 model = BaselineModelSuperClasses().to(device)
-model.load_state_dict(torch.load(PATH, map_location='cpu'))
-PATH=os.path.join('models/new_data_best_model_1.zip')
+model.load_state_dict(torch.load('models/new_data_super_classes_best_model_1.zip', map_location='cpu'))
 model2 = BaselineModel().to(device)
-model2.load_state_dict(torch.load(PATH, map_location='cpu'))
+model2.load_state_dict(torch.load('models/new_data_best_model_1.zip', map_location='cpu'))
 superclasses = ["Taxonomic", "Symmetric", "Other", "Non-Symmetric", "Other"]
 df_reltype = pd.read_csv("https://raw.githubusercontent.com/SisonkeBiotik-Africa/MeSH2Wikidata/main/new_encoding.csv")
 superc_id = {"Taxonomic": ["P279", "P31", "P361"],
@@ -154,29 +139,26 @@ superc_id = {"Taxonomic": ["P279", "P31", "P361"],
                         "P926", "P927"],
             "Other": []}
 def process(i):
-    subj = ID_T[df2["subject"][i]]
-    obj = ID_T[df2["object"][i]]
-    try:
-        if(i%500==0):
-          print("relation ",i)
-        inputd = torch.as_tensor(get_matrix(subj,obj))
-        superclass_id = model(inputd).argmax().item()
-        relation_type_id = model2(inputd).argmax().item()
-        superclass = superclasses[superclass_id]
-        relation_type = df_reltype["label"][relation_type_id]
-        if not(relation_type in superc_id[superclass]):
-            relation_type = "N/A"
+  try:
+      if(i%500==0):
         print("relation ",i)
-        print("Subject:", subj, "\nProperty:", relation_type, "\nObject:", obj, "\nReferences:", PubIds[:3])
-        df2["property"][i] = relation_type
-        df2["references"][i] = PubIds[:3]
-        if(i%100==0):
-            #save df2 to pkl file
-            df2.to_pickle("from0.pkl")
-    except:
-        # print("No PubMed records found for this relation")
-        if(i%100==0):
-            df2.to_pickle("from0.pkl")
-        return
-Parallel(n_jobs=-1)(delayed(process)(i) for i in range(0,len(df2["subject"])))
-df2.to_pickle("from0.pkl")
+      subj = ID_T[df2["subject"][i]]
+      obj = ID_T[df2["object"][i]]
+      inputd = torch.as_tensor(get_matrix(subj,obj))
+      superclass_id = model(inputd).argmax().item()
+      relation_type_id = model2(inputd).argmax().item()
+      superclass = superclasses[superclass_id]
+      relation_type = df_reltype["label"][relation_type_id]
+      if not(relation_type in superc_id[superclass]):
+          relation_type = "N/A"
+      print("relation ",i)
+      print("Subject:", subj, "\nProperty:", relation_type, "\nObject:", obj, "\nReferences:", PubIds[:3])
+      df2["property"][i] = relation_type
+      df2["references"][i] = PubIds[:3]
+      #update the pkl file
+      df2.to_pickle("results.pkl")
+  except:
+      return
+
+pd.set_option('mode.chained_assignment', None)
+Parallel(n_jobs=6, prefer="threads")(delayed(process)(i) for i in range(41121,200000))
